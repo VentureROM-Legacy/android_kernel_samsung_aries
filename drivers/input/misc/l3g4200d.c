@@ -79,15 +79,11 @@
 #define MAX_ENTRY	1
 #define MAX_DELAY	(MAX_ENTRY * 9523809LL)
 
-
-
 /*#define SHIFT_ADJ_2G		4
 #define SHIFT_ADJ_4G		3
 #define SHIFT_ADJ_8G		2*/
 
 #define DEBUG 0
-
-static DEFINE_MUTEX(l3g4200d_mutex);
 
 static unsigned char reg_backup[5];
 static unsigned int fd_cnt = 0;
@@ -748,18 +744,16 @@ static int l3g4200d_close(struct inode *inode, struct file *file)
 
 
 /*  ioctl command for l3g4200d device file */
-static int l3g4200d_ioctl(struct file *file,
+static long l3g4200d_ioctl(struct file *file,
 			       unsigned int cmd, unsigned long arg)
 {
-	int err = 0;
+	long err = 0;
 	unsigned char data[6];
-	mutex_lock(&l3g4200d_mutex);
 	/* check l3g4200d_client */
 	if (gyro->client == NULL) {
 		#if DEBUG
 		printk(KERN_ERR "I2C driver not install\n");
 		#endif
-		mutex_unlock(&l3g4200d_mutex);
 		return -EFAULT;
 	}
 
@@ -776,27 +770,30 @@ static int l3g4200d_ioctl(struct file *file,
 			#if DEBUG
 			printk(KERN_ERR "copy_from_user error\n");
 			#endif
+			return -EFAULT;
 		}
 		err = l3g4200d_set_range(*data);
-		break;
+		return err;
 
 	case L3G4200D_SET_MODE:
 		if (copy_from_user(data, (unsigned char *)arg, 1) != 0) {
 			#if DEBUG
 			printk(KERN_ERR "copy_to_user error\n");
 			#endif
+			return -EFAULT;
 		}
 		err = l3g4200d_set_mode(*data);
-		break;
+		return err;
 
 	case L3G4200D_SET_BANDWIDTH:
 		if (copy_from_user(data, (unsigned char *)arg, 1) != 0) {
 			#if DEBUG
 			printk(KERN_ERR "copy_from_user error\n");
 			#endif
+			return -EFAULT;
 		}
 		err = l3g4200d_set_bandwidth(*data);
-		break;
+		return err;
 
 	case L3G4200D_READ_GYRO_VALUES:
 		err = l3g4200d_read_gyro_values(
@@ -807,24 +804,23 @@ static int l3g4200d_ioctl(struct file *file,
 			#if DEBUG
 			printk(KERN_ERR "copy_to error\n");
 			#endif
+			return -EFAULT;
 		}
-		break;
+		return err;
 
 	default:
-		err = 0;
+		return 0;
 	}
-	mutex_unlock(&l3g4200d_mutex);
-	return err;
 }
 
 
 static const struct file_operations l3g4200d_fops = {
 	.owner = THIS_MODULE,
+	.open = l3g4200d_open,
 	.read = l3g4200d_read,
 	.write = l3g4200d_write,
-	.open = l3g4200d_open,
-	.release = l3g4200d_close,
 	.unlocked_ioctl = l3g4200d_ioctl,
+	.release = l3g4200d_close,
 };
 
 
@@ -947,6 +943,7 @@ static int l3g4200d_probe(struct i2c_client *client,
 	}
 
 	mutex_init(&data->lock);
+	mutex_lock(&data->lock);
 
 	/* hrtimer settings.  we poll for gyro values using a timer. */
 	hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1038,6 +1035,8 @@ static int l3g4200d_probe(struct i2c_client *client,
 
 	printk(KERN_INFO "%s : L3G4200D device created successfully\n", __func__);
 
+	mutex_unlock(&data->lock);
+
 	return 0;
 
 error_destroy:
@@ -1092,11 +1091,11 @@ static int l3g4200d_remove(struct i2c_client *client)
 	gyro->client = NULL;
 	return 0;
 }
-#ifdef CONFIG_PM
-static int l3g4200d_suspend(struct i2c_client *client, pm_message_t state)
+
+static int l3g4200d_suspend(struct device* dev)
 {
-	int i;
 	#if DEBUG
+	int i;
 	printk(KERN_INFO "l3g4200d_suspend\n");
 	#endif
 
@@ -1122,10 +1121,10 @@ static int l3g4200d_suspend(struct i2c_client *client, pm_message_t state)
 	return 0;
 }
 
-static int l3g4200d_resume(struct i2c_client *client)
+static int l3g4200d_resume(struct device* dev)
 {
-	int i;
 	#if DEBUG
+	int i;
 	printk(KERN_INFO "l3g4200d_resume\n");
 	#endif
 
@@ -1148,7 +1147,11 @@ static int l3g4200d_resume(struct i2c_client *client)
 
 	return 0;
 }
-#endif
+
+static const struct dev_pm_ops l3g4200d_pm_ops = {
+	.suspend = l3g4200d_suspend,
+	.resume = l3g4200d_resume,
+};
 
 static const struct i2c_device_id l3g4200d_id[] = {
 	{ "l3g4200d", 0 },
@@ -1158,26 +1161,18 @@ static const struct i2c_device_id l3g4200d_id[] = {
 MODULE_DEVICE_TABLE(i2c, l3g4200d_id);
 
 static struct i2c_driver l3g4200d_driver = {
-	.class = I2C_CLASS_HWMON,
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = "l3g4200d",
+		.pm = &l3g4200d_pm_ops,
+	},
 	.probe = l3g4200d_probe,
 	.remove = __devexit_p(l3g4200d_remove),
 	.id_table = l3g4200d_id,
-	#ifdef CONFIG_PM
-	.suspend = l3g4200d_suspend,
-	.resume = l3g4200d_resume,
-	#endif
-	.driver = {
-	.owner = THIS_MODULE,
-	.name = "l3g4200d",
-	},
-	/*
-	.detect = l3g4200d_detect,
-	*/
 };
 
 static int __init l3g4200d_init(void)
 {
-
 	printk("%s \n",__func__);
 
 	printk(KERN_INFO "L3G4200D init driver\n");

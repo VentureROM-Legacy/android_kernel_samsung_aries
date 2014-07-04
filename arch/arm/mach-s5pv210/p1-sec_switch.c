@@ -21,7 +21,7 @@
 #include <linux/switch.h>
 #include <mach/param.h>
 #include <linux/fsa9480.h>
-#include <linux/sec_battery.h>
+#include <linux/power/sec_battery.h>
 #include <asm/mach/arch.h>
 #include <linux/regulator/consumer.h>
 #include <mach/gpio.h>

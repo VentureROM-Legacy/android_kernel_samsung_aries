@@ -2343,9 +2343,10 @@ int sdhci_suspend_host(struct sdhci_host *host, pm_message_t state)
 
 	if (host->irq)
 		disable_irq(host->irq);
-#ifndef CONFIG_PHONE_P1_CDMA
+#ifndef CONFIG_MACH_P1
 	if (host->vmmc)
-		ret = regulator_disable(host->vmmc);
+		if (regulator_is_enabled(host->vmmc))
+			ret = regulator_disable(host->vmmc);
 #endif
 	return ret;
 }
@@ -2356,11 +2357,13 @@ int sdhci_resume_host(struct sdhci_host *host)
 {
 	int ret = 0;
 
-#ifndef CONFIG_PHONE_P1_CDMA
+#ifndef CONFIG_MACH_P1
 	if (host->vmmc) {
-		int ret = regulator_enable(host->vmmc);
-		if (ret)
-			return ret;
+		if (!regulator_is_enabled(host->vmmc)) {
+			int ret = regulator_enable(host->vmmc);
+			if (ret)
+				return ret;
+		}
 	}
 #endif
 
@@ -2824,13 +2827,14 @@ int sdhci_add_host(struct sdhci_host *host)
 	if (ret)
 		goto untasklet;
 
-#ifndef CONFIG_PHONE_P1_CDMA
+#ifndef CONFIG_MACH_P1
 	host->vmmc = regulator_get(mmc_dev(mmc), "vmmc");
 	if (IS_ERR(host->vmmc)) {
 		printk(KERN_INFO "%s: no vmmc regulator found\n", mmc_hostname(mmc));
 		host->vmmc = NULL;
 	} else {
-		regulator_enable(host->vmmc);
+		if (!regulator_is_enabled(host->vmmc))
+			regulator_enable(host->vmmc);
 	}
 #endif
 
@@ -2921,10 +2925,12 @@ void sdhci_remove_host(struct sdhci_host *host, int dead)
 	tasklet_kill(&host->card_tasklet);
 	tasklet_kill(&host->finish_tasklet);
 
-#ifndef CONFIG_PHONE_P1_CDMA
+#ifndef CONFIG_MACH_P1
 	if (host->vmmc) {
-		regulator_disable(host->vmmc);
-		regulator_put(host->vmmc);
+		if (regulator_is_enabled(host->vmmc)) {
+			regulator_disable(host->vmmc);
+			regulator_put(host->vmmc);
+		}
 	}
 #endif
 

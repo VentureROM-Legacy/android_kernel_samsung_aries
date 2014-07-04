@@ -9,7 +9,6 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
@@ -27,8 +26,6 @@
 #include "bma020_acc.h"
 #include "bma020calib.h"
 
-
-static DEFINE_MUTEX(bma020_mutex);
 
 /* add by inter.park */
 //extern void enable_acc_pins(void);
@@ -71,8 +68,8 @@ static ssize_t bma020_fs_write(struct device *dev, struct device_attribute *attr
 
 static ssize_t bma020_calibration(struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
 {
-	int err;
-	bma020acc_t data, offset;
+	int err, offset;
+	bma020acc_t data;
 	/* iteration time 20 */
 	int i = 0;
 
@@ -218,14 +215,12 @@ int bma020_ioctl(struct inode *inode, struct file *filp, unsigned int ioctl_num,
 #endif
 
 
-int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
+long bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 {
-	int err = 0;
+	long err = 0;
 	unsigned char data[6];
 	int temp;
 	bma020acc_t accels;
-
-	mutex_lock(&bma020_mutex);
 
 	/* check cmd */
 	if(_IOC_TYPE(cmd) != BMA020_IOC_MAGIC)
@@ -233,7 +228,6 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 		printk("cmd magic type error\n");
 #endif
-		mutex_unlock(&bma020_mutex);
 		return -ENOTTY;
 	}
 	if(_IOC_NR(cmd) > BMA020_IOC_MAXNR)
@@ -241,7 +235,6 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 		printk("cmd number error\n");
 #endif
-		mutex_unlock(&bma020_mutex);
 		return -ENOTTY;
 	}
 
@@ -254,7 +247,6 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 		printk("cmd access_ok error\n");
 #endif
-		mutex_unlock(&bma020_mutex);
 		return -EFAULT;
 	}
 	#if 0
@@ -277,9 +269,9 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 				printk("copy_to error\n");
 #endif
-				err = -EFAULT;
+				return -EFAULT;
 			}
-			break;
+			return err;
 
 		case BMA020_SET_RANGE:
 			if(copy_from_user(data,(unsigned char*)arg,1)!=0)
@@ -287,11 +279,10 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 				printk("[BMA020] copy_from_user error\n");
 #endif
-				mutex_unlock(&bma020_mutex);
 				return -EFAULT;
 			}
 			err = bma020_set_range(*data);
-			break;
+			return err;
 
 		case BMA020_SET_MODE:
 			if(copy_from_user(data,(unsigned char*)arg,1)!=0)
@@ -299,11 +290,10 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 				printk("[BMA020] copy_from_user error\n");
 #endif
-				mutex_unlock(&bma020_mutex);
 				return -EFAULT;
 			}
 			err = bma020_set_mode(*data);
-			break;
+			return err;
 
 		case BMA020_SET_BANDWIDTH:
 			if(copy_from_user(data,(unsigned char*)arg,1)!=0)
@@ -311,11 +301,10 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 #if DEBUG
 				printk("[BMA020] copy_from_user error\n");
 #endif
-				mutex_unlock(&bma020_mutex);
 				return -EFAULT;
 			}
 			err = bma020_set_bandwidth(*data);
-			break;
+			return err;
 
 		/* offset calibration routine */
 		case BMA020_CALIBRATION:
@@ -323,27 +312,24 @@ int bma020_ioctl(struct file *filp, unsigned int cmd,  unsigned long arg)
 			if(copy_from_user((bma020acc_t*)data,(bma020acc_t*)arg, 6)!=0)
 			{
 				printk("copy_from_user error\n");
-				mutex_unlock(&bma020_mutex);
 				return -EFAULT;
 			}
 
 			/* iteration time 20 */
 			temp = 20;
 			err = bma020_calibrate(*(bma020acc_t*)data, &temp);
-			printk( "BMA020_CALIBRATION status: %d\n", err);
+			//printk( "BMA020_CALIBRATION status: %d\n", err);
 		default:
-			err = 0;
+			return 0;
 	}
-	mutex_unlock(&bma020_mutex);
-	return err;
 }
 
 struct file_operations acc_fops =
 {
 	.owner   = THIS_MODULE,
+	.open    = bma020_open,
 	.read    = bma020_read,
 	.write   = bma020_write,
-	.open    = bma020_open,
 	.unlocked_ioctl = bma020_ioctl,
 	.release = bma020_release,
 };
@@ -538,8 +524,7 @@ static int bma020_accelerometer_probe( struct platform_device* pdev )
 	return bma020_acc_start();
 }
 
-
-static int bma020_accelerometer_suspend( struct platform_device* pdev, pm_message_t state )
+static int bma020_accelerometer_suspend( struct device *dev )
 {
 	printk(" %s \n",__func__);
 	bma020_set_mode( BMA020_MODE_SLEEP );
@@ -547,22 +532,25 @@ static int bma020_accelerometer_suspend( struct platform_device* pdev, pm_messag
 }
 
 
-static int bma020_accelerometer_resume( struct platform_device* pdev )
+static int bma020_accelerometer_resume( struct device *dev )
 {
 	printk(" %s \n",__func__);
 	bma020_set_mode( BMA020_MODE_NORMAL );
 	return 0;
 }
 
+static const struct dev_pm_ops bma020_accelerometer_pm_ops = {
+	.suspend	= bma020_accelerometer_suspend,
+	.resume		= bma020_accelerometer_resume,
+};
 
 static struct platform_device *bma020_accelerometer_device;
 
 static struct platform_driver bma020_accelerometer_driver = {
 	.probe 	 = bma020_accelerometer_probe,
-	.suspend = bma020_accelerometer_suspend,
-	.resume  = bma020_accelerometer_resume,
 	.driver  = {
 		.name = "bma020-accelerometer",
+		.pm	= &bma020_accelerometer_pm_ops,
 	}
 };
 

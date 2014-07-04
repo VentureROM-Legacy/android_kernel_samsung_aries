@@ -1,0 +1,117 @@
+#!/stage1/sh
+export _PATH="$PATH"
+export PATH="/stage1"
+
+busybox cd /
+busybox date >>boot.txt
+exec >>boot.txt 2>&1
+busybox mount -t proc proc /proc
+busybox mount -t sysfs sysfs /sys
+
+busybox rm /init
+
+bml_over_mtd dump boot 72 reservoir 2004 /stage1/boot.bin
+
+load_image=/stage1/boot.cpio
+
+# defaults
+CACHE='mmcblk0p1'
+DATA='mmcblk0p2'
+SDCARD='mmcblk1p1'
+NO_EMMC='false'
+BOOTSTRAP='false'
+
+# find the sdcard
+if busybox test `cat /sys/devices/platform/s3c-sdhci.0/mmc_host/mmc0/mmc0:0001/type` != "MMC" ; then
+	# user has removed the eMMC
+	CACHE='mmcblk0p3'
+	SDCARD='mmcblk0p1'
+	NO_EMMC='true'
+fi
+busybox mount -t vfat /dev/block/"$SDCARD" /sdcard
+
+# check for bootstrap flag
+if busybox test -e /sdcard/activate_data_on_sdcard ; then
+	BOOTSTRAP='true'
+	if ! $NO_EMMC ; then
+		CACHE='mmcblk1p3'
+		DATA='mmcblk1p2'
+	fi
+fi
+
+busybox mount -t yaffs2 /dev/block/mtdblock2 /system
+busybox mount -t ext4 /dev/block/"$CACHE" /cache
+
+if busybox test -e /cache/.startrecovery || busybox grep -q bootmode=2 /proc/cmdline ; then
+	# recovery boot
+	busybox echo 'RECOVERY BOOT' >>boot.txt
+	busybox rm -fr /cache/.startrecovery
+
+	load_image=/stage1/recovery.cpio
+
+elif ! busybox test -e /system/build.prop ; then
+	# emergency boot
+	busybox echo "EMERGENCY BOOT" >>boot.txt
+	busybox umount /cache
+	busybox make_ext4fs -b 4096 -g 32768 -i 8192 -I 256 -a /cache /dev/block/"$CACHE"
+	busybox mount -t ext4 /dev/block/"$CACHE" /cache
+
+	if ! busybox test -e /cache/recovery ; then
+		busybox mkdir /cache/recovery
+	fi
+
+	if busybox test -e /sdcard/omni.cfg ; then
+		busybox echo "installing: `busybox cat /sdcard/omni.cfg`" >>boot.txt
+		busybox echo "creating recovery command" >>boot.txt
+		busybox touch /cache/recovery/command
+		busybox echo "--update_package=`busybox cat /sdcard/omni.cfg`" > /cache/recovery/command
+	else
+		busybox echo "omni.cfg not found" >>boot.txt
+	fi
+
+	load_image=/stage1/recovery.cpio
+
+	# umount sdcard
+	busybox umount /sdcard
+
+else
+	# android boot
+	busybox echo "ANDROID BOOT" >>boot.txt
+	busybox echo "loading boot.cpio" >>boot.txt
+fi
+
+busybox umount /cache
+busybox umount /system
+busybox rm -rf /sdcard
+
+busybox cpio -ui < ${load_image}
+
+if busybox grep -q 1 /sys/class/power_supply/battery/charging_mode_booting ; then
+	# low power mode
+	busybox cp lpm.rc init.rc
+	busybox rm init.p1c.rc
+fi
+
+if $BOOTSTRAP ; then
+	busybox sed -i s/mmcblk0p1/"$CACHE"/ /fstab.p1c
+	busybox sed -i s/mmcblk0p2/"$DATA"/ /fstab.p1c
+
+	busybox sed -i s/mmcblk0p1/"$CACHE"/ /etc/recovery.fstab
+	busybox sed -i s/mmcblk0p2/"$DATA"/ /etc/recovery.fstab
+	busybox sed -i s/mmcblk1p1/"$SDCARD"/ /etc/recovery.fstab
+
+	busybox sed -i s/mmcblk0p1/"$CACHE"/ /etc/twrp.fstab
+	busybox sed -i s/mmcblk0p2/"$DATA"/ /etc/twrp.fstab
+	busybox sed -i s/mmcblk1p1/"$SDCARD"/ /etc/twrp.fstab
+fi
+
+busybox umount /sys
+busybox umount /proc
+busybox date >> /boot.txt
+
+busybox rm -rf /dev/*
+busybox rm -rf /stage1
+
+export PATH="${_PATH}"
+
+exec /init

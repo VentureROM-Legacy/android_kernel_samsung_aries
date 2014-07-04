@@ -24,8 +24,8 @@
 #include <linux/irq.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
-#include <linux/sec_battery.h>
-#include <linux/max17042_battery.h>
+#include <linux/power/sec_battery.h>
+#include <linux/power/max17042_battery.h>
 #include <linux/fsa9480.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -79,6 +79,7 @@
 #define LOW_BLOCK_TEMP			0
 #define LOW_RECOVER_TEMP		30
 
+#define BATTERY_CURRENT
 
 struct battery_info {
 	s32 batt_vol;		/* Battery voltage from ADC */
@@ -142,6 +143,8 @@ struct chg_data {
 #endif
 };
 
+static bool disable_charger;
+
 static char *supply_list[] = {
 	"battery",
 };
@@ -191,6 +194,10 @@ static struct device_attribute sec_battery_attrs[] = {
 	SEC_BATTERY_ATTR(batt_temp_check),
 	SEC_BATTERY_ATTR(batt_full_check),
 #endif
+#ifdef BATTERY_CURRENT
+	SEC_BATTERY_ATTR(batt_current),
+#endif
+	SEC_BATTERY_ATTR(disable_charger),
 };
 
 
@@ -237,8 +244,8 @@ void p1_lpm_mode_check(struct chg_data *chg)
 static void sec_bat_set_cable(struct sec_battery_callbacks *ptr,
 	enum cable_type_t status)
 {
-	printk("%s : cable_type = %d ( 0 : NONE, 1: USB, 2: TA) \n",__func__,status);
 	struct chg_data *chg = container_of(ptr, struct chg_data, callbacks);
+	printk("%s : cable_type = %d ( 0 : NONE, 1: USB, 2: TA) \n",__func__,status);
 	chg->cable_status = status;
 	power_supply_changed(&chg->psy_ac);
 	power_supply_changed(&chg->psy_usb);
@@ -249,10 +256,10 @@ static void sec_bat_set_cable(struct sec_battery_callbacks *ptr,
 static void sec_bat_set_status(struct sec_battery_callbacks *ptr,
 	enum charging_status_type_t status)
 {
-	printk("%s : charging_status = %d ( -1 : ERROR, 0 : NONE, 1: ACTIVE, 2: FULL) \n",__func__,status);
 	struct chg_data *chg = container_of(ptr, struct chg_data, callbacks);
-	chg->charging_status = status;
 	int vdc_status = 0;
+	printk("%s : charging_status = %d ( -1 : ERROR, 0 : NONE, 1: ACTIVE, 2: FULL) \n",__func__,status);
+	chg->charging_status = status;
 
 	if(chg->pdata && chg->pdata->pmic_charger &&
 			chg->pdata->pmic_charger->get_connection_status)
@@ -287,8 +294,8 @@ static void sec_bat_set_status(struct sec_battery_callbacks *ptr,
 
 static void sec_bat_force_update(struct sec_battery_callbacks *ptr)
 {
-	printk("%s : force update called\n",__func__);
 	struct chg_data *chg = container_of(ptr, struct chg_data, callbacks);
+	printk("%s : force update called\n",__func__);
 
 	// Just update now.
 	wake_lock(&chg->work_wake_lock);
@@ -304,7 +311,7 @@ static bool check_UV_charging_case(struct chg_data *chg)
 	int threshold = 0;
 
 	if (chg->pdata && chg->pdata->psy_fuelgauge &&
-	    chg->pdata->psy_fuelgauge->get_property) {
+		chg->pdata->psy_fuelgauge->get_property) {
 		chg->pdata->psy_fuelgauge->get_property(chg->pdata->psy_fuelgauge,
 			POWER_SUPPLY_PROP_VOLTAGE_NOW, &value);
 		vcell = (value.intval / 1000);
@@ -396,8 +403,17 @@ static int sec_bat_get_property(struct power_supply *bat_ps,
 			return -EINVAL;
 
 		// Capacity cannot exceed 100%.
-		if ( val->intval >= 100 || chg->bat_info.batt_is_full )
+		if(val->intval >= 100)
 			val->intval = 100;
+
+		// Update 100% only full charged with TA Charger.
+		if (chg->bat_info.batt_is_full &&
+			(chg->cable_status == CABLE_TYPE_AC && !chg->bat_info.batt_improper_ta))
+			val->intval = 100;
+		else {
+			if(val->intval == 100)
+				val->intval = 99;
+		}
 
 #ifdef CONFIG_BATTERY_MAX17042
 		if(chg->low_batt_boot_flag)
@@ -408,6 +424,17 @@ static int sec_bat_get_property(struct power_supply *bat_ps,
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
+#ifdef BATTERY_CURRENT
+	case BATT_CURRENT:
+		if (chg->pdata && chg->pdata->psy_fuelgauge &&
+			chg->pdata->psy_fuelgauge->get_property &&
+			chg->pdata->psy_fuelgauge->get_property(
+			chg->pdata->psy_fuelgauge, psp, val) < 0)
+
+			return -EINVAL;
+
+		break;
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -562,18 +589,18 @@ static int sec_get_bat_temp(struct chg_data *chg)
 
 	if (chg->bat_info.batt_temp >= HIGH_BLOCK_TEMP) {
 		if (health != POWER_SUPPLY_HEALTH_OVERHEAT &&
-		    health != POWER_SUPPLY_HEALTH_UNSPEC_FAILURE)
+			health != POWER_SUPPLY_HEALTH_UNSPEC_FAILURE)
 			chg->bat_info.batt_health =
 					POWER_SUPPLY_HEALTH_OVERHEAT;
 	} else if (chg->bat_info.batt_temp <= HIGH_RECOVER_TEMP &&
-	    chg->bat_info.batt_temp >= LOW_RECOVER_TEMP) {
+		chg->bat_info.batt_temp >= LOW_RECOVER_TEMP) {
 		if (health == POWER_SUPPLY_HEALTH_OVERHEAT ||
-		    health == POWER_SUPPLY_HEALTH_COLD)
+			health == POWER_SUPPLY_HEALTH_COLD)
 			chg->bat_info.batt_health =
 					POWER_SUPPLY_HEALTH_GOOD;
 	} else if (chg->bat_info.batt_temp <= LOW_BLOCK_TEMP) {
 		if (health != POWER_SUPPLY_HEALTH_COLD &&
-		    health != POWER_SUPPLY_HEALTH_UNSPEC_FAILURE)
+			health != POWER_SUPPLY_HEALTH_UNSPEC_FAILURE)
 			chg->bat_info.batt_health =
 				POWER_SUPPLY_HEALTH_COLD;
 	}
@@ -590,11 +617,11 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 	ktime_t ktime;
 	struct timespec cur_time;
 	union power_supply_propval value;
-	bool vdc_status;
+	bool vdc_status = false;
 	int recover_flag = 0;
 
 	if (chg->pdata && chg->pdata->psy_fuelgauge &&
-	     chg->pdata->psy_fuelgauge->get_property) {
+		chg->pdata->psy_fuelgauge->get_property) {
 		chg->pdata->psy_fuelgauge->get_property(chg->pdata->psy_fuelgauge,
 		POWER_SUPPLY_PROP_VOLTAGE_NOW, &value);
 		chg->bat_info.batt_vcell = value.intval;
@@ -607,7 +634,7 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 #ifdef CONFIG_BATTERY_MAX17042
 	// Corruption check algorithm
 	if(chg->pdata && chg->pdata->get_jig_status &&
-	    !chg->pdata->get_jig_status()) {  // Not using Jig.
+		!chg->pdata->get_jig_status()) {  // Not using Jig.
 		if(chg->pdata && chg->pdata->fuelgauge_cb)
 			recover_flag = chg->pdata->fuelgauge_cb(REQ_CAP_CORRUPTION_CHECK, 0, 0);
 	}
@@ -615,7 +642,7 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 	// Get recoverd values if recover flag is set.
 	if(recover_flag) {
 		if (chg->pdata && chg->pdata->psy_fuelgauge &&
-		     chg->pdata->psy_fuelgauge->get_property) {
+			chg->pdata->psy_fuelgauge->get_property) {
 			chg->pdata->psy_fuelgauge->get_property(chg->pdata->psy_fuelgauge,
 			POWER_SUPPLY_PROP_VOLTAGE_NOW, &value);
 			chg->bat_info.batt_vcell = value.intval;
@@ -637,7 +664,7 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 	if(chg->low_batt_boot_flag) {
 		// 1. Check charger connection status
 		if(chg->pdata && chg->pdata->pmic_charger &&
-		    chg->pdata->pmic_charger->get_connection_status)
+			chg->pdata->pmic_charger->get_connection_status)
 			vdc_status = chg->pdata->pmic_charger->get_connection_status();
 
 		// 2. Restart SOC gauging after (vcell >= threshold) condition satisfied.
@@ -655,7 +682,7 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 	// Start low battery compensation algorithm
 	if(!chg->charging && ((chg->bat_info.batt_vcell/1000) <= chg->check_start_vol)) {
 		if(chg->pdata && chg->pdata->get_jig_status &&
-		    !chg->pdata->get_jig_status()) {  // Not using Jig.
+			!chg->pdata->get_jig_status()) {  // Not using Jig.
 			if (chg->pdata && chg->pdata->fuelgauge_cb)
 				chg->pdata->fuelgauge_cb(REQ_LOW_BATTERY_COMPENSATION, 1, 0);
 		}
@@ -697,7 +724,7 @@ static void sec_bat_discharge_reason(struct chg_data *chg)
 
 	if (chg->discharging_time &&
 			cur_time.tv_sec > chg->discharging_time) {
-		pr_info("%s : cur_time = %d, timeout = %d\n", __func__, cur_time.tv_sec, chg->discharging_time);
+		//pr_info("%s : cur_time = %d, timeout = %d\n", __func__, cur_time.tv_sec, chg->discharging_time);
 		chg->set_charge_timeout = true;
 //		chg->bat_info.dis_reason |= DISCONNECT_OVER_TIME;  // for GED (crespo).
 		chg->bat_info.dis_reason |= DISCONNECT_BAT_FULL;
@@ -734,12 +761,12 @@ static bool check_samsung_charger(void)
 		pr_info("%s: vol_1 = %d, vol_2 = %d!!\n", __func__, vol_1, vol_2);
 
 		//3. Check range of the voltage
-	    if( (vol_1 < 800) || (vol_1 > 1470) || (vol_2 < 800) || (vol_2 > 1470) ) {
-		    pr_info("%s: Improper charger is connected!!!\n", __func__);
-		    fsa9480_manual_switching(AUTO_SWITCH);
-		    return false;
-	    }
-    } //for ( i=0; i<3; i++)
+		if ( (vol_1 < 800) || (vol_1 > 1470) || (vol_2 < 800) || (vol_2 > 1470) ) {
+			pr_info("%s: Improper charger is connected!!!\n", __func__);
+			fsa9480_manual_switching(AUTO_SWITCH);
+			return false;
+		}
+	} //for ( i=0; i<3; i++)
 
 	pr_info("%s: Samsung charger is connected!!!\n", __func__);
 	fsa9480_manual_switching(AUTO_SWITCH);
@@ -809,13 +836,12 @@ static int sec_cable_status_update(struct chg_data *chg)
 
 	/* if max8998 has detected vdcin */
 	if (chg->pdata && chg->pdata->pmic_charger &&
-	    chg->pdata->pmic_charger->get_connection_status &&
-	    chg->pdata->pmic_charger->get_connection_status())
+		chg->pdata->pmic_charger->get_connection_status &&
+		chg->pdata->pmic_charger->get_connection_status())
 	{
 		vdc_status = true;
-		if (chg->bat_info.dis_reason) {
-			pr_info("%s : battery status discharging : %d\n",
-				__func__, chg->bat_info.dis_reason);
+		if (chg->bat_info.dis_reason || disable_charger) {
+			//pr_info("%s : battery status discharging : %d\n", __func__, chg->bat_info.dis_reason);
 			/* have vdcin, but cannot charge */
 			chg->charging = false;
 			ret = sec_bat_charging_control(chg);
@@ -871,12 +897,12 @@ static int sec_cable_status_update(struct chg_data *chg)
 	}
 
 update:
-	if(chg->bat_info.charging_status == POWER_SUPPLY_STATUS_FULL ||
-	    chg->bat_info.charging_status == POWER_SUPPLY_STATUS_CHARGING) {
+	if (chg->bat_info.charging_status == POWER_SUPPLY_STATUS_FULL ||
+		chg->bat_info.charging_status == POWER_SUPPLY_STATUS_CHARGING) {
 		/* Update DISCHARGING status in case of USB cable or Improper charger */
-		if(chg->cable_status==CABLE_TYPE_USB || chg->bat_info.batt_improper_ta) {
+		if (chg->cable_status==CABLE_TYPE_USB || chg->bat_info.batt_improper_ta) {
 			chg->bat_info.charging_status = POWER_SUPPLY_STATUS_DISCHARGING;
-        }
+		}
 	}
 
 	if ((chg->cable_status != CABLE_TYPE_NONE) && vdc_status)
@@ -902,8 +928,7 @@ static void sec_program_alarm(struct chg_data *chg, int seconds)
 
 static void sec_bat_work(struct work_struct *work)
 {
-	struct chg_data *chg =
-		container_of(work, struct chg_data, bat_work);
+	struct chg_data *chg = container_of(work, struct chg_data, bat_work);
 	int ret;
 	struct timespec ts;
 	unsigned long flags;
@@ -959,8 +984,8 @@ static ssize_t sec_bat_show_attrs(struct device *dev,
 	switch (off) {
 	case BATT_VOL:
 		if (chg->pdata &&
-		    chg->pdata->psy_fuelgauge &&
-		    chg->pdata->psy_fuelgauge->get_property) {
+			chg->pdata->psy_fuelgauge &&
+			chg->pdata->psy_fuelgauge->get_property) {
 			chg->pdata->psy_fuelgauge->get_property(
 				chg->pdata->psy_fuelgauge,
 				POWER_SUPPLY_PROP_VOLTAGE_NOW, &value);
@@ -979,8 +1004,8 @@ static ssize_t sec_bat_show_attrs(struct device *dev,
 
 	case BATT_FG_SOC:
 		if (chg->pdata &&
-		    chg->pdata->psy_fuelgauge &&
-		    chg->pdata->psy_fuelgauge->get_property) {
+			chg->pdata->psy_fuelgauge &&
+			chg->pdata->psy_fuelgauge->get_property) {
 			chg->pdata->psy_fuelgauge->get_property(
 				chg->pdata->psy_fuelgauge,
 				POWER_SUPPLY_PROP_CAPACITY, &value);
@@ -989,10 +1014,14 @@ static ssize_t sec_bat_show_attrs(struct device *dev,
 		i += scnprintf(buf + i, PAGE_SIZE - i, "%d\n", chg->bat_info.batt_soc);
 		break;
 
+	case DISABLE_CHARGER:
+		i += scnprintf(buf + i, PAGE_SIZE - i, "%d\n", disable_charger);
+		break;
+
 #ifdef CONFIG_BATTERY_MAX17042
 	case BATT_FG_CHECK:
 		if(chg->pdata &&
-		    chg->pdata->fuelgauge_cb)
+			chg->pdata->fuelgauge_cb)
 			value.intval = chg->pdata->fuelgauge_cb(REQ_TEST_MODE_INTERFACE,
 						TEST_MODE_FUEL_GAUGE_CHECK, 0);
 		else
@@ -1024,6 +1053,22 @@ static ssize_t sec_bat_show_attrs(struct device *dev,
 		i += scnprintf(buf + i, PAGE_SIZE - i, "%d\n", chg->bat_info.batt_is_full);
 		break;
 #endif
+#ifdef BATTERY_CURRENT
+	case BATT_CURRENT:
+		if (chg->pdata &&
+			chg->pdata->psy_fuelgauge &&
+			chg->pdata->psy_fuelgauge->get_property)
+		{
+			chg->pdata->psy_fuelgauge->get_property(
+				chg->pdata->psy_fuelgauge,
+				POWER_SUPPLY_PROP_CURRENT_NOW, &value);
+
+			chg->bat_info.batt_current = value.intval;
+		}
+		i += scnprintf(buf + i, PAGE_SIZE - i, "%d\n", chg->bat_info.batt_current);
+		break;
+#endif
+
 	default:
 		i = -EINVAL;
 	}
@@ -1049,7 +1094,7 @@ static ssize_t sec_bat_store_attrs(struct device *dev, struct device_attribute *
 			if (x == 1) {
 				// Get DCIN status from PMIC.
 				if(chg->pdata && chg->pdata->pmic_charger &&
-				    chg->pdata->pmic_charger->get_connection_status)
+					chg->pdata->pmic_charger->get_connection_status)
 					vdc_status = chg->pdata->pmic_charger->get_connection_status();
 
 				// Get Jig status from Switch.
@@ -1073,7 +1118,7 @@ static ssize_t sec_bat_store_attrs(struct device *dev, struct device_attribute *
 		if (sscanf(buf, "%d\n", &x) == 1 || x==2 || x==3 || x==4) {
 			if (x==1 || x== 2 || x==3 || x==4) {
 				if(chg->pdata &&
-				    chg->pdata->fuelgauge_cb)
+					chg->pdata->fuelgauge_cb)
 					chg->pdata->fuelgauge_cb(REQ_TEST_MODE_INTERFACE,
 						TEST_MODE_RESET_CAPACITY, x);
 			}
@@ -1087,7 +1132,7 @@ static ssize_t sec_bat_store_attrs(struct device *dev, struct device_attribute *
 			if (x == 1)
 {
 				if(chg->pdata &&
-				    chg->pdata->fuelgauge_cb)
+					chg->pdata->fuelgauge_cb)
 					chg->pdata->fuelgauge_cb(REQ_TEST_MODE_INTERFACE,
 						TEST_MODE_DUMP_FG_REGISTER, 0);
 			}
@@ -1105,6 +1150,13 @@ static ssize_t sec_bat_store_attrs(struct device *dev, struct device_attribute *
 		}
 		break;
 #endif
+
+	case DISABLE_CHARGER:
+		if (sscanf(buf, "%d\n", &x) == 1) {
+			disable_charger = x;
+			ret = count;
+		}
+		break;
 
 	default:
 		ret = -EINVAL;
@@ -1188,9 +1240,9 @@ static __devinit int sec_battery_probe(struct platform_device *pdev)
 
 	// Check UV charging case.
 	if(chg->pdata && chg->pdata->pmic_charger &&
-	    chg->pdata->pmic_charger->get_connection_status) {
+		chg->pdata->pmic_charger->get_connection_status) {
 		if(chg->pdata->pmic_charger->get_connection_status() &&
-		    check_UV_charging_case(chg))
+			check_UV_charging_case(chg))
 			chg->low_batt_boot_flag = true;
 	}
 	else
@@ -1263,11 +1315,10 @@ static __devinit int sec_battery_probe(struct platform_device *pdev)
 	queue_work(chg->monitor_wqueue, &chg->bat_work);
 
 	p1_lpm_mode_check(chg);
+	disable_charger = 0;
 
 	return 0;
 
-err_supply_unreg_ac:
-	power_supply_unregister(&chg->psy_ac);
 err_supply_unreg_usb:
 	power_supply_unregister(&chg->psy_usb);
 err_supply_unreg_bat:
@@ -1331,13 +1382,14 @@ static void sec_battery_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops sec_battery_pm_ops = {
-	.prepare        = sec_battery_suspend,
-	.complete       = sec_battery_resume,
+	.prepare = sec_battery_suspend,
+	.complete = sec_battery_resume,
 };
 
 static struct platform_driver sec_battery_driver = {
 	.driver = {
 		.name = "sec_battery",
+		.owner = THIS_MODULE,
 		.pm = &sec_battery_pm_ops,
 	},
 	.probe = sec_battery_probe,

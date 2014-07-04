@@ -176,7 +176,12 @@ int s3cfb_set_clock(struct s3cfb_global *ctrl)
 	cfg = readl(ctrl->regs + S3C_VIDCON0);
 	cfg &= ~(S3C_VIDCON0_CLKSEL_MASK | S3C_VIDCON0_CLKVALUP_MASK |
 		 S3C_VIDCON0_VCLKEN_MASK | S3C_VIDCON0_CLKDIR_MASK |
+#ifdef CONFIG_MACH_ARIES
 		 S3C_VIDCON0_CLKVAL_F(-1));
+#else // CONFIG_MACH_P1
+		 S3C_VIDCON0_CLKVAL_F(0xff));
+#endif
+
 #if defined(CONFIG_FB_S3C_MDNIE) && defined(CONFIG_FB_S3C_LVDS)
 	cfg |= (S3C_VIDCON0_CLKSEL_SCLK | S3C_VIDCON0_CLKVALUP_ALWAYS |
 		S3C_VIDCON0_VCLKEN_FREERUN);
@@ -205,7 +210,11 @@ int s3cfb_set_clock(struct s3cfb_global *ctrl)
 	}
 
 	div = src_clk / vclk;
+#ifdef CONFIG_MACH_ARIES
 	if (src_clk % vclk)
+#else // CONFIG_MACH_P1
+	if (src_clk % vclk > vclk / 2)
+#endif
 		div++;
 
 	if ((src_clk/div) > maxclk)
@@ -618,7 +627,7 @@ int s3cfb_set_buffer_address(struct s3cfb_global *ctrl, int id)
 	return 0;
 }
 
-int s3cfb_set_alpha_value_width(struct s3cfb_global *ctrl, int id)
+void s3cfb_set_alpha_value_width(struct s3cfb_global *ctrl, int id)
 {
        struct fb_info *fb = ctrl->fb[id];
        struct fb_var_screeninfo *var = &fb->var;

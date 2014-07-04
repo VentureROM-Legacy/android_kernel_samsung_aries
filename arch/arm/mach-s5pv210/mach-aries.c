@@ -31,6 +31,7 @@
 #include <linux/irq.h>
 #include <linux/skbuff.h>
 #include <linux/console.h>
+#include <linux/ion.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -49,7 +50,7 @@
 #ifdef CONFIG_SAMSUNG_FASCINATE
 #include <mach/regs-gpio.h>
 #endif
-
+#include <mach/voltages.h>
 #include <linux/usb/gadget.h>
 #include <linux/fsa9480.h>
 #include <linux/pn544.h>
@@ -325,6 +326,8 @@ static struct s3cfb_lcd s6e63m0 = {
 #define  S5PV210_ANDROID_PMEM_MEMSIZE_PMEM_GPU1 (3000 * SZ_1K)
 #define  S5PV210_ANDROID_PMEM_MEMSIZE_PMEM_ADSP (1500 * SZ_1K)
 #define  S5PV210_VIDEO_SAMSUNG_MEMSIZE_TEXTSTREAM (3000 * SZ_1K)
+#define  S5PV210_VIDEO_SAMSUNG_MEMSIZE_ION (S5PV210_LCD_WIDTH * \
+						 S5PV210_LCD_HEIGHT * 4 * 3)
 
 
 static struct s5p_media_device aries_media_devs[] = {
@@ -377,7 +380,15 @@ static struct s5p_media_device aries_media_devs[] = {
 		.memsize = S5PV210_VIDEO_SAMSUNG_MEMSIZE_FIMD,
 		.paddr = 0,
 	},
-#ifdef CONFIG_ANDROID_PMEM
+#ifdef CONFIG_ION_S5P
+	[7] = {
+		.id = S5P_MDEV_ION,
+		.name = "ion",
+		.bank = 1,
+		.memsize = S5PV210_VIDEO_SAMSUNG_MEMSIZE_ION,
+		.paddr = 0,
+	},
+#elif defined(CONFIG_ANDROID_PMEM)
 	[7] = {
 		.id = S5P_MDEV_PMEM,
 		.name = "pmem",
@@ -413,28 +424,28 @@ static struct s5p_media_device aries_media_devs[] = {
 static struct s5pv210_cpufreq_voltage smdkc110_cpufreq_volt[] = {
 	{
 		.freq	= 1200000,
-		.varm	= 1275000,
-		.vint	= 1100000,
+		.varm	= DVSARM2,
+		.vint	= DVSINT1,
 	}, {
 		.freq	= 1000000,
-		.varm	= 1275000,
-		.vint	= 1100000,
+		.varm	= DVSARM4,
+		.vint	= DVSINT3,
 	}, {
 		.freq	=  800000,
-		.varm	= 1200000,
-		.vint	= 1100000,
+		.varm	= DVSARM5,
+		.vint	= DVSINT3,
 	}, {
 		.freq	=  400000,
-		.varm	= 1050000,
-		.vint	= 1100000,
+		.varm	= DVSARM6,
+		.vint	= DVSINT3,
 	}, {
 		.freq	=  200000,
-		.varm	=  950000,
-		.vint	= 1100000,
+		.varm	= DVSARM7,
+		.vint	= DVSINT3,
 	}, {
 		.freq	=  100000,
-		.varm	=  950000,
-		.vint	= 1000000,
+		.varm	= DVSARM7,
+		.vint	= DVSINT4,
 	},
 };
 
@@ -718,7 +729,7 @@ static struct regulator_init_data aries_buck1_data = {
 		.valid_ops_mask	= REGULATOR_CHANGE_VOLTAGE |
 				  REGULATOR_CHANGE_STATUS,
 		.state_mem	= {
-			.uV	= 1250000,
+			.uV	= ARMBOOT,
 			.mode	= REGULATOR_MODE_NORMAL,
 			.disabled = 1,
 		},
@@ -736,7 +747,7 @@ static struct regulator_init_data aries_buck2_data = {
 		.valid_ops_mask	= REGULATOR_CHANGE_VOLTAGE |
 				  REGULATOR_CHANGE_STATUS,
 		.state_mem	= {
-			.uV	= 1100000,
+			.uV	= INTBOOT,
 			.mode	= REGULATOR_MODE_NORMAL,
 			.disabled = 1,
 		},
@@ -975,18 +986,6 @@ static struct max8998_platform_data max8998_pdata = {
 	.num_regulators = ARRAY_SIZE(aries_regulators),
 	.regulators     = aries_regulators,
 	.charger        = &aries_charger,
-	/* Preloads must be in increasing order of voltage value */
-	.buck1_voltage4	= 950000,
-	.buck1_voltage3	= 1050000,
-	.buck1_voltage2	= 1200000,
-	.buck1_voltage1	= 1275000,
-	.buck2_voltage2	= 1000000,
-	.buck2_voltage1	= 1100000,
-	.buck1_set1	= GPIO_BUCK_1_EN_A,
-	.buck1_set2	= GPIO_BUCK_1_EN_B,
-	.buck2_set3	= GPIO_BUCK_2_EN,
-	.buck1_default_idx = 1,
-	.buck2_default_idx = 0,
 };
 
 struct platform_device sec_device_dpram = {
@@ -5062,6 +5061,40 @@ static struct platform_device watchdog_device = {
 	.id = -1,
 };
 
+#ifdef CONFIG_ION_S5P
+
+static struct ion_platform_data ion_s5p_data = {
+	.nr = 2,
+	.heaps = {
+		{
+			.type = ION_HEAP_TYPE_SYSTEM,
+			.id = ION_HEAP_TYPE_SYSTEM,
+			.name = "system",
+		},
+		{
+			.type = ION_HEAP_TYPE_CARVEOUT,
+			.id = ION_HEAP_TYPE_CARVEOUT,
+			.name = "carveout",
+		},
+	},
+};
+
+static struct platform_device ion_s5p_device = {
+	.name = "ion-s5p",
+	.id = -1,
+	.dev = {
+		.platform_data = &ion_s5p_data,
+	},
+};
+
+static void ion_s5p_set_platdata(void)
+{
+	ion_s5p_data.heaps[1].base = s5p_get_media_memory_bank(S5P_MDEV_ION, 1);
+	ion_s5p_data.heaps[1].size = s5p_get_media_memsize_bank(S5P_MDEV_ION, 1);
+}
+
+#endif /* CONFIG_ION_S5P */
+
 static struct platform_device *aries_devices[] __initdata = {
 	&watchdog_device,
 #ifdef CONFIG_FIQ_DEBUGGER
@@ -5124,6 +5157,12 @@ static struct platform_device *aries_devices[] __initdata = {
 	&s3c_device_i2c12, /* magnetic sensor */
 #if defined (CONFIG_SAMSUNG_CAPTIVATE)
 	&s3c_device_i2c13,
+#endif
+#if defined CONFIG_USB_S3C_OTG_HOST
+	&s3c_device_usb_otghcd,
+#endif
+#if defined CONFIG_USB_DWC_OTG
+	&s3c_device_usb_dwcotg,
 #endif
 #ifdef CONFIG_USB_GADGET
 	&s3c_device_usbgadget,
@@ -5191,6 +5230,10 @@ static struct platform_device *aries_devices[] __initdata = {
 	&ram_console_device,
 	&sec_device_wifi,
 	&samsung_asoc_dma,
+
+#ifdef CONFIG_ION_S5P
+	&ion_s5p_device,
+#endif
 };
 
 static void __init aries_map_io(void)
@@ -5435,6 +5478,10 @@ static void __init aries_machine_init(void)
 	android_pmem_set_platdata();
 #endif
 
+#ifdef CONFIG_ION_S5P
+	ion_s5p_set_platdata();
+#endif
+
 	/* headset/earjack detection */
 #if defined(CONFIG_SAMSUNG_CAPTIVATE)
     gpio_request(GPIO_EAR_MICBIAS_EN, "ear_micbias_enable");
@@ -5574,18 +5621,17 @@ void otg_phy_init(void)
 			S3C_USBOTG_PHYCLK);
 	writel((readl(S3C_USBOTG_RSTCON) & ~(0x3<<1)) | (0x1<<0),
 			S3C_USBOTG_RSTCON);
-	msleep(1);
+	mdelay(1);
 	writel(readl(S3C_USBOTG_RSTCON) & ~(0x7<<0),
 			S3C_USBOTG_RSTCON);
-	msleep(1);
+	mdelay(1);
 
 	/* rising/falling time */
 	writel(readl(S3C_USBOTG_PHYTUNE) | (0x1<<20),
 			S3C_USBOTG_PHYTUNE);
 
-	/* set DC level as 6 (6%) */
-	writel((readl(S3C_USBOTG_PHYTUNE) & ~(0xf)) | (0x1<<2) | (0x1<<1),
-			S3C_USBOTG_PHYTUNE);
+	/* set DC level as 0xf (24%) */
+	writel(readl(S3C_USBOTG_PHYTUNE) | 0xf, S3C_USBOTG_PHYTUNE);
 }
 EXPORT_SYMBOL(otg_phy_init);
 
@@ -5634,6 +5680,47 @@ void usb_host_phy_off(void)
 			S5P_USB_PHY_CONTROL);
 }
 EXPORT_SYMBOL(usb_host_phy_off);
+#endif
+
+#if defined CONFIG_USB_S3C_OTG_HOST || defined CONFIG_USB_DWC_OTG
+
+/* Initializes OTG Phy */
+void otg_host_phy_init(void)
+{
+	__raw_writel(__raw_readl(S5P_USB_PHY_CONTROL)
+		|(0x1<<0), S5P_USB_PHY_CONTROL); /*USB PHY0 Enable */
+	// from galaxy tab otg host:
+	__raw_writel((__raw_readl(S3C_USBOTG_PHYPWR)
+		&~(0x3<<3)&~(0x1<<0))|(0x1<<5), S3C_USBOTG_PHYPWR);
+	// from galaxy s2 otg host:
+	//     __raw_writel((__raw_readl(S3C_USBOTG_PHYPWR)
+	//           &~(0x7<<3)&~(0x1<<0)), S3C_USBOTG_PHYPWR);
+	__raw_writel((__raw_readl(S3C_USBOTG_PHYCLK)
+		&~(0x1<<4))|(0x7<<0), S3C_USBOTG_PHYCLK);
+
+	__raw_writel((__raw_readl(S3C_USBOTG_RSTCON)
+		&~(0x3<<1))|(0x1<<0), S3C_USBOTG_RSTCON);
+
+	mdelay(1);
+
+	__raw_writel((__raw_readl(S3C_USBOTG_RSTCON)
+		&~(0x7<<0)), S3C_USBOTG_RSTCON);
+
+	mdelay(1);
+
+	__raw_writel((__raw_readl(S3C_UDC_OTG_GUSBCFG)
+		|(0x3<<8)), S3C_UDC_OTG_GUSBCFG);
+
+	//smb136_set_otg_mode(1);
+
+	printk("otg_host_phy_int : USBPHYCTL=0x%x,PHYPWR=0x%x,PHYCLK=0x%x,USBCFG=0x%x\n",
+		readl(S5P_USB_PHY_CONTROL),
+		readl(S3C_USBOTG_PHYPWR),
+		readl(S3C_USBOTG_PHYCLK),
+		readl(S3C_UDC_OTG_GUSBCFG)
+	);
+}
+EXPORT_SYMBOL(otg_host_phy_init);
 #endif
 
 MACHINE_START(ARIES, "aries")
