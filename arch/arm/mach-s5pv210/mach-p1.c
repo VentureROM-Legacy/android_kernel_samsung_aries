@@ -98,7 +98,9 @@
 #include <linux/i2c/l3g4200d.h>
 #include <../../../drivers/input/misc/bma020.h>
 #include <../../../drivers/video/samsung/s3cfb.h>
+#ifdef CONFIG_SAMSUNG_JACK
 #include <linux/sec_jack.h>
+#endif
 #include <linux/power/max17042_battery.h>
 #include <linux/switch.h>
 
@@ -154,8 +156,11 @@ struct wifi_mem_prealloc {
 
 #endif
 
+#ifdef CONFIG_SAMSUNG_JACK
 static DEFINE_SPINLOCK(mic_bias_lock);
 static bool jack_mic_bias;
+#endif
+
 struct sec_battery_callbacks *callbacks;
 struct max17042_callbacks *max17042_cb;
 static enum cable_type_t set_cable_status;
@@ -366,9 +371,11 @@ static struct s3cfb_lcd lvds = {
 						 (CONFIG_FB_S3C_NUM_OVLY_WIN * \
 						  CONFIG_FB_S3C_NUM_BUF_OVLY_WIN)))
 #define  S5PV210_VIDEO_SAMSUNG_MEMSIZE_JPEG (3600 * SZ_1K)
-#define  S5PV210_ION_MEMSIZE_SYSTEM (3600 * SZ_1K)
-#define  S5PV210_ION_MEMSIZE_SCONTIG (3600 * SZ_1K)
-#define  S5PV210_ION_MEMSIZE_CARVEOUT (8192 * SZ_1K)
+#define  S5P_MAX_VIDEO_BUFFERS	8
+#define  S5P_VIDEO_Y_SIZE	ALIGN(1280 * 720, PAGE_SIZE)
+#define  S5P_VIDEO_UV_SIZE	ALIGN(1280 * 360, PAGE_SIZE)
+#define  S5P_ION_CARVEOUT	\
+	S5P_MAX_VIDEO_BUFFERS * (S5P_VIDEO_Y_SIZE + S5P_VIDEO_UV_SIZE)
 
 static struct s5p_media_device p1_media_devs[] = {
 	[0] = {
@@ -414,25 +421,11 @@ static struct s5p_media_device p1_media_devs[] = {
 		.paddr = 0,
 	},
 #ifdef CONFIG_ION_S5P
-	[7] = {
-		.id = S5P_MDEV_ION_SYSTEM,
-		.name = "ion_system",
-		.bank = 1,
-		.memsize = S5PV210_ION_MEMSIZE_SYSTEM,
-		.paddr = 0,
-	},
-	[8] = {
-		.id = S5P_MDEV_ION_SCONTIG,
-		.name = "ion_system_contig",
-		.bank = 1,
-		.memsize = S5PV210_ION_MEMSIZE_SCONTIG,
-		.paddr = 0,
-	},
-	[9] = {
+	[6] = {
 		.id = S5P_MDEV_ION_CARVEOUT,
-		.name = "ion_carveout",
+		.name = "ion-carveout",
 		.bank = 1,
-		.memsize = S5PV210_ION_MEMSIZE_CARVEOUT,
+		.memsize = S5P_ION_CARVEOUT,
 		.paddr = 0,
 	},
 #endif
@@ -2629,6 +2622,7 @@ static struct s3c_platform_jpeg jpeg_plat __initdata = {
 };
 #endif
 
+#ifdef CONFIG_SAMSUNG_JACK
 static void set_shared_mic_bias(void)
 {
 	gpio_set_value(GPIO_EAR_MICBIAS0_EN, jack_mic_bias);
@@ -2644,6 +2638,7 @@ static void sec_jack_set_micbias_state(bool on)
 	set_shared_mic_bias();
 	spin_unlock_irqrestore(&mic_bias_lock, flags);
 }
+#endif
 
 static struct i2c_board_info i2c_devs4[] __initdata = {
 	{
@@ -3075,6 +3070,7 @@ static struct platform_device sec_device_btsleep = {
 	.id	= -1,
 };
 
+#ifdef CONFIG_SAMSUNG_JACK
 static struct sec_jack_zone sec_jack_zones[] = {
 	{
 		/* adc == 0, unstable zone, default to 3pole if it stays
@@ -3181,6 +3177,7 @@ static void __init sec_jack_init(void)
 
 	printk("EAR_MICBIAS Init\n");
 }
+#endif
 
  /* touch screen device init */
 static void __init qt_touch_init(void)
@@ -3211,7 +3208,7 @@ static void __init nmi_i2s_cfg_gpio_init(void)
 	s3c_gpio_setpull(GPIO_I2S_LRCLK_18V, S3C_GPIO_PULL_NONE);
 	s3c_gpio_setpull(GPIO_I2S_DATA_18V, S3C_GPIO_PULL_NONE);
 }
-#elif defined (CONFIG_SAMSUNG_P1N)
+#elif defined (CONFIG_SAMSUNG_P1LN)
 static void __init nmi_pwr_disable(void)
 {
 	int err = 0;
@@ -7167,25 +7164,20 @@ static struct platform_device p1_keyboard = {
 #endif
 
 #ifdef CONFIG_ION_S5P
-struct ion_platform_heap heaps[] = {
+struct ion_platform_heap p1_heaps[] = {
 	{
-		.type  = ION_HEAP_TYPE_SYSTEM,
-		.id    = ION_HEAP_TYPE_SYSTEM,
-		.name  = "ion_heap_system",
+		.id	    = ION_HEAP_TYPE_SYSTEM,
+		.type	= ION_HEAP_TYPE_SYSTEM,
+		.name	= "system",
 	},{
-		.type  = ION_HEAP_TYPE_SYSTEM_CONTIG,
-		.id    = ION_HEAP_TYPE_SYSTEM_CONTIG,
-		.name  = "ion_heap_system_contig",
-	},{
-		.type  = ION_HEAP_TYPE_CARVEOUT,
-		.id    = ION_HEAP_TYPE_CARVEOUT,
-		.name  = "ion_heap_carveout",
-	},
+		.id	    = ION_HEAP_TYPE_CARVEOUT,
+		.type	= ION_HEAP_TYPE_CARVEOUT,
+		.name	= "carveout",
+	}
 };
-
 static struct ion_platform_data ion_s5p_data = {
-	.nr = ARRAY_SIZE(heaps),
-	.heaps = heaps,
+	.nr = ARRAY_SIZE(p1_heaps),
+	.heaps = p1_heaps,
 };
 
 static struct platform_device ion_s5p_device = {
@@ -7198,22 +7190,10 @@ static struct platform_device ion_s5p_device = {
 
 static void __init ion_s5p_set_platdata(void)
 {
-	ion_s5p_data.heaps[0].base =
-		s5p_get_media_memory_bank(S5P_MDEV_ION_SYSTEM, 1);
-	ion_s5p_data.heaps[0].size =
-		s5p_get_media_memsize_bank(S5P_MDEV_ION_SYSTEM, 1);
-
 	ion_s5p_data.heaps[1].base =
-		s5p_get_media_memory_bank(S5P_MDEV_ION_SCONTIG, 1);
-	ion_s5p_data.heaps[1].size =
-		s5p_get_media_memsize_bank(S5P_MDEV_ION_SCONTIG, 1);
-
-	ion_s5p_data.heaps[2].base =
 		s5p_get_media_memory_bank(S5P_MDEV_ION_CARVEOUT, 1);
-	ion_s5p_data.heaps[2].size =
+	ion_s5p_data.heaps[1].size =
 		s5p_get_media_memsize_bank(S5P_MDEV_ION_CARVEOUT, 1);
-
-	ion_reserve(&ion_s5p_data);
 }
 #endif /* CONFIG_ION_S5P */
 
@@ -7605,6 +7585,10 @@ static void __init p1_machine_init(void)
 	/*initialise the gpio's*/
 	p1_init_gpio();
 
+#ifdef CONFIG_ION_S5P
+	ion_s5p_set_platdata();
+#endif
+
 	gpio_request(GPIO_TOUCH_EN, "touch en");
 
 	/* i2c */
@@ -7685,10 +7669,6 @@ static void __init p1_machine_init(void)
 	s3c_mfc_set_platdata(NULL);
 #endif
 
-#ifdef CONFIG_ION_S5P
-	ion_s5p_set_platdata();
-#endif
-
 #ifdef CONFIG_S3C_DEV_HSMMC
 	s5pv210_default_sdhci0();
 #endif
@@ -7723,14 +7703,16 @@ static void __init p1_machine_init(void)
 
 	p1_init_wifi_mem();
 
+#ifdef CONFIG_SAMSUNG_JACK
 	sec_jack_init();
+#endif
 
 	qt_touch_init();
 
 
 #if defined (CONFIG_VIDEO_NM6XX)
 	nmi_i2s_cfg_gpio_init();
-#elif defined (CONFIG_SAMSUNG_P1N)
+#elif defined (CONFIG_SAMSUNG_P1LN)
 	nmi_pwr_disable();  // Disable the ISDBT PWR : Only Latin HW 0.3
 #endif
 
